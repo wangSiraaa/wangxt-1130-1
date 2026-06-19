@@ -3,12 +3,15 @@ package com.farm.plantprotection.controller;
 import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.farm.plantprotection.common.Result;
 import com.farm.plantprotection.entity.Prescription;
+import com.farm.plantprotection.entity.PrescriptionDetail;
 import com.farm.plantprotection.service.PrescriptionService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.bind.annotation.*;
 
 import javax.annotation.Resource;
+import java.time.LocalDate;
 import java.util.List;
+import java.util.Map;
 
 @Slf4j
 @RestController
@@ -55,5 +58,25 @@ public class PrescriptionController {
     @GetMapping("/approved/list")
     public Result<List<Prescription>> getApprovedForOutbound() {
         return Result.success(prescriptionService.getApprovedPrescriptionsForOutbound());
+    }
+
+    @PostMapping("/validate-comprehensive")
+    public Result<Map<String, Object>> validateComprehensive(@RequestBody Map<String, Object> params) {
+        Long plotId = Long.valueOf(params.get("plotId").toString());
+        LocalDate prescriptionDate = params.get("prescriptionDate") != null ?
+                LocalDate.parse(params.get("prescriptionDate").toString()) : LocalDate.now();
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> detailMaps = (List<Map<String, Object>>) params.get("details");
+        List<PrescriptionDetail> details = new java.util.ArrayList<>();
+        if (detailMaps != null) {
+            for (Map<String, Object> dm : detailMaps) {
+                PrescriptionDetail d = new PrescriptionDetail();
+                if (dm.get("pesticideId") != null) d.setPesticideId(Long.valueOf(dm.get("pesticideId").toString()));
+                details.add(d);
+            }
+        }
+        List<String> warnings = prescriptionService.validatePrescriptionComprehensive(plotId, details, prescriptionDate);
+        boolean hasBlocker = warnings.stream().anyMatch(w -> w.startsWith("【禁限用药】") || w.startsWith("【作物不适用】"));
+        return Result.success(Map.of("warnings", warnings, "hasBlocker", hasBlocker, "totalWarnings", warnings.size()));
     }
 }

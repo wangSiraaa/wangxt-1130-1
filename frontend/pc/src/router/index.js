@@ -78,6 +78,12 @@ const routes = [
         name: 'Stocks',
         component: () => import('../views/basic/Stocks.vue'),
         meta: { title: '库存管理', icon: 'Goods' }
+      },
+      {
+        path: 'harvest-plan',
+        name: 'HarvestPlan',
+        component: () => import('../views/harvest/List.vue'),
+        meta: { title: '采收计划', icon: 'Calendar', roles: ['ADMIN', 'AGRONOMIST', 'WAREHOUSE'] }
       }
     ]
   }

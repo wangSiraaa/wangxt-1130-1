@@ -82,6 +82,20 @@ public class FlightOperation implements Serializable {
 
     private String videoUrl;
 
+    private String sprayTrajectory;
+
+    private String boundaryPoints;
+
+    private Integer boundaryVerified;
+
+    private Long originalPilotId;
+
+    private String originalPilotName;
+
+    private String reassignReason;
+
+    private LocalDateTime reassignTime;
+
     private String remark;
 
     @TableField(fill = FieldFill.INSERT)

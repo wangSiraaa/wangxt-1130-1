@@ -31,5 +31,21 @@ export const api = {
   queryFlights: (params) => request.get('/flight/page', { params }).then(r => r.data),
   queryReminders: (params) => request.get('/flight/reminders', { params }).then(r => r.data),
   getPlotWarnings: (plotId) => request.get(`/flight/plot-warnings/${plotId || ''}`).then(r => r.data),
-  markReminderRead: (id, params) => request.post(`/flight/reminders/${id}/read`, null, { params }).then(r => r)
+  markReminderRead: (id, params) => request.post(`/flight/reminders/${id}/read`, null, { params }).then(r => r),
+
+  validatePrescriptionComprehensive: (data) => request.post('/prescription/validate-comprehensive', data).then(r => r.data),
+
+  reassignPilot: (id, params) => request.post(`/flight/reassign-pilot/${id}`, null, { params }).then(r => r.data),
+  cancelFlightDueToWeather: (id, params) => request.post(`/flight/cancel-weather/${id}`, null, { params }).then(r => r.data),
+
+  cancelFlightToPending: (outboundId, params) => request.post(`/outbound/cancel-flight/${outboundId}`, null, { params }).then(r => r.data),
+  queryPendingStock: (params) => request.get('/outbound/pending-stock/page', { params }).then(r => r.data),
+  verifyPendingStock: (id, params) => request.post(`/outbound/pending-stock/${id}/verify`, null, { params }).then(r => r),
+
+  createHarvestPlan: (data) => request.post('/harvest-plan/create', data).then(r => r.data),
+  getHarvestPlan: (id) => request.get(`/harvest-plan/${id}`).then(r => r.data),
+  queryHarvestPlans: (params) => request.get('/harvest-plan/page', { params }).then(r => r.data),
+  completeHarvest: (id, params) => request.post(`/harvest-plan/complete/${id}`, null, { params }).then(r => r.data),
+  cancelHarvest: (id) => request.post(`/harvest-plan/cancel/${id}`).then(r => r.data),
+  unlockExpiredPlans: () => request.post('/harvest-plan/unlock-expired').then(r => r)
 }

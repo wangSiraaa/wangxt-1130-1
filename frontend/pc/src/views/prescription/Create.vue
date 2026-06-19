@@ -62,6 +62,16 @@
 
         <el-divider content-position="left">农药明细</el-divider>
 
+        <el-alert v-if="comprehensiveWarnings.length > 0" type="warning" :closable="false" style="margin-bottom:16px">
+          <template #title><b>处方审批四合一校验提示（病虫害等级/禁限用药/邻近作物/安全间隔期）</b></template>
+          <div v-for="(w, i) in comprehensiveWarnings" :key="i" style="padding:2px 0">
+            <el-icon v-if="w.startsWith('【禁限用药】') || w.startsWith('【作物不适用】')" color="#F56C6C"><WarningFilled /></el-icon>
+            <el-icon v-else-if="w.startsWith('【邻近地块风险】')" color="#E6A23C"><Warning /></el-icon>
+            <el-icon v-else color="#409EFF"><InfoFilled /></el-icon>
+            {{ w }}
+          </div>
+        </el-alert>
+
         <el-table :data="form.details" border style="width:100%">
           <el-table-column label="序号" type="index" width="60" />
           <el-table-column label="农药名称" min-width="200">
@@ -145,7 +155,7 @@
 <script setup>
 import { ref, reactive, onMounted, computed } from 'vue'
 import { useRouter } from 'vue-router'
-import { ArrowLeft, Plus, EditPen, Check } from '@element-plus/icons-vue'
+import { ArrowLeft, Plus, EditPen, Check, WarningFilled, Warning, InfoFilled } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { api } from '../../api'
 
@@ -154,6 +164,7 @@ const formRef = ref(null)
 const submitting = ref(false)
 const plots = ref([])
 const pesticides = ref([])
+const comprehensiveWarnings = ref([])
 
 const user = JSON.parse(localStorage.getItem('user') || '{}')
 
@@ -194,6 +205,25 @@ function onPesticideChange(id, idx) {
     form.details[idx].pesticideName = p.pesticideName
     form.details[idx].pesticideCode = p.pesticideCode
   }
+  runComprehensiveValidation()
+}
+
+async function runComprehensiveValidation() {
+  if (!form.plotId || form.details.every(d => !d.pesticideId)) {
+    comprehensiveWarnings.value = []
+    return
+  }
+  try {
+    const res = await api.validatePrescriptionComprehensive({
+      plotId: form.plotId,
+      prescriptionDate: form.prescriptionDate,
+      details: form.details.filter(d => d.pesticideId).map(d => ({ pesticideId: d.pesticideId }))
+    })
+    comprehensiveWarnings.value = res.warnings || []
+    if (res.hasBlocker) {
+      ElMessage.warning('存在阻断性风险，请检查处方校验提示')
+    }
+  } catch (e) {}
 }
 function addDetail() {
   form.details.push({ pesticideId: null, formulation: '', concentration: '', maxWindSpeed: null, dosagePerMu: 0, dosageUnit: 'ml', usageMethod: '飞防', times: 1, intervalDays: 7, remark: '' })

@@ -100,4 +100,18 @@ public class FlightOperationController {
         flightOperationService.markReminderRead(id, userId);
         return Result.success();
     }
+
+    @PostMapping("/reassign-pilot/{id}")
+    public Result<FlightOperation> reassignPilot(@PathVariable Long id,
+                                                   @RequestParam Long newPilotId,
+                                                   @RequestParam String newPilotName,
+                                                   @RequestParam String reason) {
+        return Result.success(flightOperationService.reassignPilot(id, newPilotId, newPilotName, reason));
+    }
+
+    @PostMapping("/cancel-weather/{id}")
+    public Result<FlightOperation> cancelDueToWeather(@PathVariable Long id,
+                                                       @RequestParam(required = false) String cancelReason) {
+        return Result.success(flightOperationService.cancelDueToWeather(id, cancelReason));
+    }
 }

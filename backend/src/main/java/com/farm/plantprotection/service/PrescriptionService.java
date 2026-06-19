@@ -17,8 +17,10 @@ import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Collectors;
 
 @Slf4j
 @Service
@@ -40,6 +42,88 @@ public class PrescriptionService {
 
     @Resource
     private BusinessValidator businessValidator;
+
+    @Resource
+    private PlotNeighborMapper plotNeighborMapper;
+
+    @Resource
+    private SafetyIntervalConfigMapper safetyIntervalConfigMapper;
+
+    @Resource
+    private SafetyIntervalReminderMapper safetyIntervalReminderMapper;
+
+    public List<String> validatePrescriptionComprehensive(Long plotId, List<PrescriptionDetail> details, LocalDate prescriptionDate) {
+        List<String> warnings = new ArrayList<>();
+        if (plotId == null || details == null || details.isEmpty()) {
+            return warnings;
+        }
+        FarmPlot plot = farmPlotMapper.selectById(plotId);
+        if (plot == null) {
+            return warnings;
+        }
+
+        for (PrescriptionDetail detail : details) {
+            if (detail.getPesticideId() == null) continue;
+            Pesticide pesticide = pesticideMapper.selectById(detail.getPesticideId());
+            if (pesticide == null) continue;
+
+            if (pesticide.getIsForbidden() != null && pesticide.getIsForbidden() == 1) {
+                warnings.add("【禁限用药】农药【" + pesticide.getPesticideName() + "】为禁用农药！原因：" + pesticide.getForbiddenReason());
+            }
+
+            if (plot.getCropType() != null && pesticide.getApplicableCrops() != null) {
+                String[] applicableArr = pesticide.getApplicableCrops().split("/");
+                boolean applicable = false;
+                for (String ac : applicableArr) {
+                    if (ac.trim().equals(plot.getCropType())) {
+                        applicable = true;
+                        break;
+                    }
+                }
+                if (!applicable) {
+                    warnings.add("【作物不适用】农药【" + pesticide.getPesticideName() + "】适用作物为" + pesticide.getApplicableCrops() + "，当前地块作物为" + plot.getCropType() + "，可能产生药害！");
+                }
+            }
+
+            SafetyIntervalConfig config = safetyIntervalConfigMapper.selectOne(
+                    new LambdaQueryWrapper<SafetyIntervalConfig>()
+                            .eq(SafetyIntervalConfig::getPesticideId, detail.getPesticideId())
+                            .eq(SafetyIntervalConfig::getCropType, plot.getCropType())
+                            .eq(SafetyIntervalConfig::getStatus, 1)
+            );
+            int intervalDays = config != null ? config.getIntervalDays() :
+                    (pesticide.getSafetyInterval() != null && pesticide.getSafetyInterval() > 0 ? pesticide.getSafetyInterval() : 7);
+            warnings.add("【安全间隔期】农药【" + pesticide.getPesticideName() + "】安全间隔期" + intervalDays + "天，施药后" + intervalDays + "天内禁止采收");
+
+            List<PlotNeighbor> neighbors = plotNeighborMapper.selectList(
+                    new LambdaQueryWrapper<PlotNeighbor>().eq(PlotNeighbor::getPlotId, plotId)
+            );
+            for (PlotNeighbor neighbor : neighbors) {
+                FarmPlot neighborPlot = farmPlotMapper.selectById(neighbor.getNeighborPlotId());
+                if (neighborPlot == null) continue;
+                if (neighborPlot.getCropType() != null && pesticide.getApplicableCrops() != null) {
+                    String[] appArr = pesticide.getApplicableCrops().split("/");
+                    boolean neighborApplicable = false;
+                    for (String ac : appArr) {
+                        if (ac.trim().equals(neighborPlot.getCropType())) {
+                            neighborApplicable = true;
+                            break;
+                        }
+                    }
+                    if (!neighborApplicable) {
+                        warnings.add("【邻近地块风险】邻近地块【" + neighbor.getNeighborPlotName() + "】(" + neighbor.getNeighborDirection() + "，" + neighbor.getDistance() + "m)种植" + neighborPlot.getCropType() + "，农药【" + pesticide.getPesticideName() + "】对该作物不适用，存在漂移药害风险！");
+                    }
+                }
+                if (neighbor.getDistance() != null && neighbor.getDistance().compareTo(new BigDecimal("100")) <= 0) {
+                    if (pesticide.getToxicity() != null && ("高毒".equals(pesticide.getToxicity()) || "剧毒".equals(pesticide.getToxicity()))) {
+                        warnings.add("【邻近地块风险】农药【" + pesticide.getPesticideName() + "】为" + pesticide.getToxicity() + "农药，邻近地块【" + neighbor.getNeighborPlotName() + "】距离仅" + neighbor.getDistance() + "m，建议使用低毒替代药！");
+                    }
+                }
+            }
+        }
+
+        return warnings;
+    }
 
     @Transactional(rollbackFor = Exception.class)
     public Prescription createPrescription(Prescription prescription) {
@@ -87,6 +171,43 @@ public class PrescriptionService {
         }
 
         businessValidator.validatePesticideNotForbidden(detail.getPesticideId());
+
+        if (plot.getCropType() != null && pesticide.getApplicableCrops() != null) {
+            String[] applicableArr = pesticide.getApplicableCrops().split("/");
+            boolean applicable = false;
+            for (String ac : applicableArr) {
+                if (ac.trim().equals(plot.getCropType())) {
+                    applicable = true;
+                    break;
+                }
+            }
+            if (!applicable) {
+                throw new BusinessException("农药【" + pesticide.getPesticideName() + "】适用作物为" + pesticide.getApplicableCrops() + "，当前地块作物为" + plot.getCropType() + "，禁止使用！");
+            }
+        }
+
+        businessValidator.validateSafetyInterval(plot.getId(), detail.getPesticideId(), LocalDate.now());
+
+        List<PlotNeighbor> neighbors = plotNeighborMapper.selectList(
+                new LambdaQueryWrapper<PlotNeighbor>().eq(PlotNeighbor::getPlotId, plot.getId())
+        );
+        for (PlotNeighbor neighbor : neighbors) {
+            FarmPlot neighborPlot = farmPlotMapper.selectById(neighbor.getNeighborPlotId());
+            if (neighborPlot == null) continue;
+            if (neighborPlot.getCropType() != null && pesticide.getApplicableCrops() != null) {
+                String[] appArr = pesticide.getApplicableCrops().split("/");
+                boolean neighborApplicable = false;
+                for (String ac : appArr) {
+                    if (ac.trim().equals(neighborPlot.getCropType())) {
+                        neighborApplicable = true;
+                        break;
+                    }
+                }
+                if (!neighborApplicable && neighbor.getDistance() != null && neighbor.getDistance().compareTo(new BigDecimal("100")) <= 0) {
+                    throw new BusinessException("邻近地块【" + neighbor.getNeighborPlotName() + "】(" + neighbor.getNeighborDirection() + "，" + neighbor.getDistance() + "m)种植" + neighborPlot.getCropType() + "，农药【" + pesticide.getPesticideName() + "】存在漂移药害风险，请更换低风险农药或增设隔离带！");
+                }
+            }
+        }
 
         detail.setPesticideCode(pesticide.getPesticideCode());
         detail.setPesticideName(pesticide.getPesticideName());

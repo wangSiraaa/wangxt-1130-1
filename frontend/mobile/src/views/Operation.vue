@@ -98,8 +98,19 @@
             <template #right-icon><van-icon name="clock-o" /></template>
           </van-field>
           <van-field v-model.number="form.actualSprayVolume" type="digit" label="实际喷药量(L)" />
+          <van-field v-model="form.sprayTrajectory" label="喷洒轨迹" type="textarea" rows="2" placeholder="GeoJSON格式轨迹数据" autosize />
+          <van-field v-model="form.boundaryPoints" label="地块边界" type="textarea" rows="2" placeholder="GeoJSON格式边界数据（自动绑定）" autosize readonly />
           <van-field v-model="form.pilotRemark" type="textarea" label="作业备注" rows="3" placeholder="作业情况、问题等" autosize />
         </van-form>
+      </div>
+
+      <div class="card" v-if="operation && (operation.operationStatus === 'IN_PROGRESS' || operation.operationStatus === 'PAUSED')">
+        <div class="card-title"><span>飞手改派</span></div>
+        <van-form>
+          <van-field v-model="reassignForm.newPilotName" label="新飞手姓名" placeholder="输入新飞手姓名" required />
+          <van-field v-model="reassignForm.reason" label="改派原因" type="textarea" rows="2" placeholder="说明改派原因" required />
+        </van-form>
+        <van-button block type="warning" plain style="margin-top:10px" @click="handleReassign">确认改派</van-button>
       </div>
 
       <div style="padding:0 0 24px">
@@ -109,6 +120,7 @@
         <van-button block type="primary" :loading="submitting" @click="handleStart" :disabled="!checkResult?.canProceed && !skipWarn">
           {{ operation?.status === 'IN_PROGRESS' ? '更新作业信息' : '开始/登记作业' }}
         </van-button>
+        <van-button block type="danger" plain style="margin-top:8px" v-if="operation && (operation.operationStatus === 'IN_PROGRESS' || operation.operationStatus === 'PAUSED')" @click="handleWeatherCancel">天气取消飞行</van-button>
         <div style="text-align:center;margin-top:10px">
           <van-checkbox v-model="skipWarn" shape="square" label-position="right">
             确认已知晓安全提示，作业条件责任自负
@@ -144,8 +156,11 @@ const form = reactive({
   operationTimeStr: '',
   weather: '晴', windSpeed: null, temperature: null, humidity: null, windDirection: '',
   plannedArea: 0, actualArea: 0, altitude: null, flightSpeed: null, flightSortie: null,
-  flightDurationStr: '', actualSprayVolume: null, pilotRemark: ''
+  flightDurationStr: '', actualSprayVolume: null, pilotRemark: '',
+  sprayTrajectory: '', boundaryPoints: ''
 })
+
+const reassignForm = reactive({ newPilotId: 0, newPilotName: '', reason: '' })
 
 const weathers = ['晴', '多云', '阴', '小雨', '中雨', '大雨', '雾']
 
@@ -182,7 +197,8 @@ async function load() {
         plannedArea: list[0].plannedArea || form.plannedArea, actualArea: list[0].actualArea,
         altitude: list[0].altitude, flightSpeed: list[0].flightSpeed,
         flightSortie: list[0].flightSortie, actualSprayVolume: list[0].actualSprayVolume,
-        pilotRemark: list[0].pilotRemark
+        pilotRemark: list[0].pilotRemark,
+        sprayTrajectory: list[0].sprayTrajectory || '', boundaryPoints: list[0].boundaryPoints || ''
       })
     }
     await runPreCheck()
@@ -246,7 +262,8 @@ async function handleStart() {
       plannedArea: form.plannedArea, actualArea: form.actualArea,
       altitude: form.altitude, flightSpeed: form.flightSpeed,
       flightSortie: form.flightSortie, actualSprayVolume: form.actualSprayVolume,
-      pilotRemark: form.pilotRemark
+      pilotRemark: form.pilotRemark,
+      sprayTrajectory: form.sprayTrajectory, boundaryPoints: form.boundaryPoints
     }
     if (operation.value && operation.value.status === 'IN_PROGRESS') {
       Object.assign(operation.value, data)
@@ -262,6 +279,31 @@ async function handleStart() {
   } catch (e) {
     console.error(e)
   } finally { submitting.value = false }
+}
+
+async function handleReassign() {
+  if (!reassignForm.newPilotName) return showToast('请输入新飞手姓名')
+  if (!reassignForm.reason) return showToast('请输入改派原因')
+  try {
+    await showDialog({ title: '确认改派', message: `将作业改派给飞手【${reassignForm.newPilotName}】，原因：${reassignForm.reason}`, showCancelButton: true })
+    await api.reassignPilot(operation.value.id, {
+      newPilotId: reassignForm.newPilotId || 0,
+      newPilotName: reassignForm.newPilotName,
+      reason: reassignForm.reason
+    })
+    showToast({ type: 'success', message: '飞手改派成功' })
+    Object.assign(reassignForm, { newPilotId: 0, newPilotName: '', reason: '' })
+    load()
+  } catch (e) {}
+}
+
+async function handleWeatherCancel() {
+  try {
+    await showDialog({ title: '天气取消飞行', message: '确认因天气原因取消本次飞行？农药将进入待核验库存，不能直接退回可用库存。', showCancelButton: true })
+    await api.cancelFlightDueToWeather(operation.value.id, { cancelReason: '天气变更，飞手取消飞行' })
+    showToast({ type: 'success', message: '飞行已取消，农药进入待核验' })
+    router.back()
+  } catch (e) {}
 }
 </script>
 

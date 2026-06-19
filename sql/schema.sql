@@ -255,7 +255,7 @@ CREATE TABLE flight_operation (
     flight_height       DECIMAL(8,2)            COMMENT '飞行高度(m)',
     flight_speed        DECIMAL(8,2)            COMMENT '飞行速度(m/s)',
     spray_width         DECIMAL(8,2)            COMMENT '喷幅(m)',
-    operation_status    VARCHAR(20)     NOT NULL DEFAULT 'IN_PROGRESS' COMMENT '作业状态: IN_PROGRESS-进行中 COMPLETED-已完成 PAUSED-已暂停 CANCELLED-已取消',
+    operation_status    VARCHAR(20)     NOT NULL DEFAULT 'IN_PROGRESS' COMMENT '作业状态: IN_PROGRESS-进行中 COMPLETED-已完成 PAUSED-已暂停 CANCELLED-已取消 FLIGHT_CANCELLED-因天气取消',
     safety_check        TINYINT         NOT NULL DEFAULT 0 COMMENT '安全检查: 0-未通过 1-已通过',
     safety_remark       VARCHAR(500)            COMMENT '安全检查备注',
     problem_description TEXT                    COMMENT '问题描述',
@@ -263,6 +263,13 @@ CREATE TABLE flight_operation (
     effect_evaluation   VARCHAR(500)            COMMENT '效果评价',
     photo_urls          TEXT                    COMMENT '作业照片(JSON数组)',
     video_url           VARCHAR(500)            COMMENT '作业视频',
+    spray_trajectory    TEXT                    COMMENT '喷洒轨迹(GeoJSON: 坐标点序列)',
+    boundary_points     TEXT                    COMMENT '地块边界绑定(GeoJSON: 实际作业边界)',
+    boundary_verified   TINYINT         NOT NULL DEFAULT 0 COMMENT '边界验证: 0-未验证 1-已验证',
+    original_pilot_id   BIGINT                  COMMENT '原飞手ID(改派时记录)',
+    original_pilot_name VARCHAR(50)             COMMENT '原飞手姓名(改派时记录)',
+    reassign_reason     VARCHAR(500)            COMMENT '改派原因',
+    reassign_time       DATETIME                COMMENT '改派时间',
     remark              VARCHAR(500)            COMMENT '备注',
     create_time         DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     update_time         DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
@@ -335,6 +342,97 @@ CREATE TABLE safety_interval_reminder (
     KEY idx_safe_end_date (safe_end_date),
     KEY idx_reminder_type (reminder_type)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='安全间隔期提醒日志表';
+
+-- =============================================
+-- 12. 地块邻近关系表
+-- =============================================
+DROP TABLE IF EXISTS plot_neighbor;
+CREATE TABLE plot_neighbor (
+    id                  BIGINT          NOT NULL AUTO_INCREMENT COMMENT '主键ID',
+    plot_id             BIGINT          NOT NULL COMMENT '地块ID',
+    plot_name           VARCHAR(100)    NOT NULL COMMENT '地块名称(冗余)',
+    neighbor_plot_id    BIGINT          NOT NULL COMMENT '邻近地块ID',
+    neighbor_plot_name  VARCHAR(100)    NOT NULL COMMENT '邻近地块名称(冗余)',
+    neighbor_direction  VARCHAR(20)             COMMENT '邻近方向: 东/南/西/北/东北/东南/西北/西南',
+    distance            DECIMAL(10,2)           COMMENT '距离(米)',
+    boundary_type       VARCHAR(30)             COMMENT '边界类型: 田埂/水渠/道路/围栏/自然',
+    remark              VARCHAR(500)            COMMENT '备注',
+    create_by           BIGINT                  COMMENT '创建人',
+    create_time         DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    update_time         DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    deleted             TINYINT         NOT NULL DEFAULT 0 COMMENT '逻辑删除: 0-未删除 1-已删除',
+    PRIMARY KEY (id),
+    KEY idx_plot_id (plot_id),
+    KEY idx_neighbor_plot_id (neighbor_plot_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='地块邻近关系表';
+
+-- =============================================
+-- 13. 采收计划表
+-- =============================================
+DROP TABLE IF EXISTS harvest_plan;
+CREATE TABLE harvest_plan (
+    id                  BIGINT          NOT NULL AUTO_INCREMENT COMMENT '主键ID',
+    plan_no             VARCHAR(30)     NOT NULL COMMENT '计划编号',
+    plot_id             BIGINT          NOT NULL COMMENT '地块ID',
+    plot_name           VARCHAR(100)    NOT NULL COMMENT '地块名称(冗余)',
+    crop_type           VARCHAR(50)             COMMENT '作物类型',
+    crop_variety        VARCHAR(50)             COMMENT '作物品种',
+    planned_harvest_date DATE           NOT NULL COMMENT '计划采收日期',
+    planned_yield       DECIMAL(12,2)           COMMENT '预计产量(kg)',
+    harvest_method      VARCHAR(50)             COMMENT '采收方式: 人工/机械',
+    status              VARCHAR(20)     NOT NULL DEFAULT 'PLANNED' COMMENT '状态: PLANNED-计划中 LOCKED-已锁定 ACTIVE-已激活 COMPLETED-已完成 CANCELLED-已取消',
+    is_locked           TINYINT         NOT NULL DEFAULT 0 COMMENT '是否锁定: 0-否 1-是',
+    lock_reason         VARCHAR(500)            COMMENT '锁定原因',
+    lock_expire_date    DATE                    COMMENT '锁定解除日期(安全间隔期结束日)',
+    remark              VARCHAR(500)            COMMENT '备注',
+    create_by           BIGINT                  COMMENT '创建人',
+    create_by_name      VARCHAR(50)             COMMENT '创建人姓名',
+    create_time         DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    update_time         DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    deleted             TINYINT         NOT NULL DEFAULT 0 COMMENT '逻辑删除: 0-未删除 1-已删除',
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_plan_no (plan_no),
+    KEY idx_plot_id (plot_id),
+    KEY idx_status (status),
+    KEY idx_planned_date (planned_harvest_date)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='采收计划表';
+
+-- =============================================
+-- 14. 农药待核验库存表
+-- =============================================
+DROP TABLE IF EXISTS pesticide_stock_pending;
+CREATE TABLE pesticide_stock_pending (
+    id                  BIGINT          NOT NULL AUTO_INCREMENT COMMENT '主键ID',
+    pending_no          VARCHAR(30)     NOT NULL COMMENT '待核验单号',
+    pesticide_id        BIGINT          NOT NULL COMMENT '农药ID',
+    pesticide_code      VARCHAR(30)             COMMENT '农药编码(冗余)',
+    pesticide_name      VARCHAR(100)            COMMENT '农药名称(冗余)',
+    batch_no            VARCHAR(50)     NOT NULL COMMENT '批号',
+    quantity            DECIMAL(12,2)   NOT NULL COMMENT '数量',
+    unit                VARCHAR(10)             COMMENT '单位',
+    source_type         VARCHAR(30)     NOT NULL COMMENT '来源类型: FLIGHT_CANCEL-飞行取消 RETURN-退回 OTHER-其他',
+    source_id           BIGINT                  COMMENT '来源单据ID',
+    source_no           VARCHAR(30)             COMMENT '来源单据编号',
+    pending_reason      VARCHAR(500)            COMMENT '待核验原因',
+    status              VARCHAR(20)     NOT NULL DEFAULT 'PENDING_VERIFY' COMMENT '状态: PENDING_VERIFY-待核验 VERIFIED-已核验回库 REJECTED-已拒绝',
+    verify_by           BIGINT                  COMMENT '核验人ID',
+    verify_by_name      VARCHAR(50)             COMMENT '核验人姓名',
+    verify_time         DATETIME                COMMENT '核验时间',
+    verify_remark       VARCHAR(500)            COMMENT '核验备注',
+    stock_id            BIGINT                  COMMENT '核验回库的库存ID',
+    warehouse_name      VARCHAR(100)            COMMENT '仓库名称',
+    remark              VARCHAR(500)            COMMENT '备注',
+    create_by           BIGINT                  COMMENT '创建人',
+    create_by_name      VARCHAR(50)             COMMENT '创建人姓名',
+    create_time         DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    update_time         DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    deleted             TINYINT         NOT NULL DEFAULT 0 COMMENT '逻辑删除: 0-未删除 1-已删除',
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_pending_no (pending_no),
+    KEY idx_pesticide_id (pesticide_id),
+    KEY idx_status (status),
+    KEY idx_source (source_type, source_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='农药待核验库存表';
 
 -- =============================================
 -- 初始化数据
@@ -422,3 +520,19 @@ INSERT INTO flight_operation (operation_no, outbound_id, outbound_no, prescripti
 INSERT INTO safety_interval_reminder (reminder_no, plot_id, plot_name, pesticide_id, pesticide_name, last_operation_id, last_operation_date, safe_end_date, interval_days, remaining_days, reminder_type, reminder_level, remind_content, notify_users) VALUES
 ('REM202606001', 1, '东区一号地', 1, '吡虫啉', 1, '2026-06-11', '2026-06-25', 14, 7, 'BEFORE_INTERVAL', 'WARNING', '东区一号地于2026-06-11喷施吡虫啉，安全间隔期14天，当前距可采收日期还有7天，禁止采收！', '2,3,6,7'),
 ('REM202606002', 1, '东区一号地', 2, '三环唑', 2, '2026-06-13', '2026-07-04', 21, 16, 'BEFORE_INTERVAL', 'DANGER', '东区一号地于2026-06-13喷施三环唑，安全间隔期21天，距离可采收日期还有16天，严禁采收！', '2,3,6,7');
+
+-- 初始化地块邻近关系
+INSERT INTO plot_neighbor (plot_id, plot_name, neighbor_plot_id, neighbor_plot_name, neighbor_direction, distance, boundary_type, remark, create_by) VALUES
+(1, '东区一号地', 2, '东区二号地', '南', 50.00, '田埂', '两块水稻田紧邻', 1),
+(2, '东区二号地', 1, '东区一号地', '北', 50.00, '田埂', '两块水稻田紧邻', 1),
+(1, '东区一号地', 5, '南区果园', '南', 120.00, '水渠', '果园在南侧隔渠', 1),
+(5, '南区果园', 1, '东区一号地', '北', 120.00, '水渠', '水稻田在北侧隔渠', 1),
+(3, '西区一号地', 4, '西区二号地', '东', 80.00, '道路', '中间有田间道路', 1),
+(4, '西区二号地', 3, '西区一号地', '西', 80.00, '道路', '中间有田间道路', 1),
+(2, '东区二号地', 5, '南区果园', '东南', 90.00, '围栏', '果园围栏边界', 1);
+
+-- 初始化采收计划
+INSERT INTO harvest_plan (plan_no, plot_id, plot_name, crop_type, crop_variety, planned_harvest_date, planned_yield, harvest_method, status, is_locked, lock_reason, lock_expire_date, remark, create_by, create_by_name) VALUES
+('HV202607001', 1, '东区一号地', '水稻', '籼稻9311', '2026-07-20', 72300.00, '机械', 'LOCKED', 1, '2026-06-13喷施三环唑，安全间隔期21天，到期日2026-07-04', '2026-07-04', '安全间隔期内禁止采收', 1, '管理员'),
+('HV202607002', 3, '西区一号地', '小麦', '济麦22', '2026-07-01', 90000.00, '机械', 'PLANNED', 0, NULL, NULL, '待确认', 1, '管理员'),
+('HV202608001', 5, '南区果园', '苹果', '红富士', '2026-08-15', 18060.00, '人工', 'PLANNED', 0, NULL, NULL, '苹果采摘季', 1, '管理员');

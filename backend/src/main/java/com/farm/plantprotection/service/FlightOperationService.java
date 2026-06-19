@@ -55,6 +55,82 @@ public class FlightOperationService {
     @Resource
     private BusinessValidator businessValidator;
 
+    @Resource
+    private HarvestPlanMapper harvestPlanMapper;
+
+    @Resource
+    private PlotBoundaryMapper plotBoundaryMapper;
+
+    @Resource
+    private PesticideStockPendingMapper pendingStockMapper;
+
+    private static final AtomicInteger pndCounter = new AtomicInteger(0);
+
+    @Transactional(rollbackFor = Exception.class)
+    public void lockHarvestPlansForSafetyInterval(FlightOperation operation) {
+        List<HarvestPlan> plans = harvestPlanMapper.selectList(
+                new LambdaQueryWrapper<HarvestPlan>()
+                        .eq(HarvestPlan::getPlotId, operation.getPlotId())
+                        .ne(HarvestPlan::getStatus, "COMPLETED")
+                        .ne(HarvestPlan::getStatus, "CANCELLED")
+                        .ge(HarvestPlan::getPlannedHarvestDate, operation.getOperationDate())
+        );
+
+        List<PesticideOutboundDetail> pesticideDetails = outboundDetailMapper.selectList(
+                new LambdaQueryWrapper<PesticideOutboundDetail>().eq(PesticideOutboundDetail::getOutboundId, operation.getOutboundId())
+        );
+
+        FarmPlot plot = farmPlotMapper.selectById(operation.getPlotId());
+        String cropType = plot != null ? plot.getCropType() : null;
+
+        for (HarvestPlan plan : plans) {
+            for (PesticideOutboundDetail pod : pesticideDetails) {
+                int intervalDays = getEffectiveIntervalDays(pod.getPesticideId(), cropType);
+                LocalDate safeEndDate = operation.getOperationDate().plusDays(intervalDays);
+
+                if (plan.getPlannedHarvestDate().isBefore(safeEndDate)) {
+                    plan.setIsLocked(1);
+                    plan.setStatus("LOCKED");
+                    Pesticide pesticide = pesticideMapper.selectById(pod.getPesticideId());
+                    String pName = pesticide != null ? pesticide.getPesticideName() : "未知农药";
+                    plan.setLockReason(String.format("%s喷施%s，安全间隔期%d天，到期日%s，期间禁止采收",
+                            operation.getOperationDate(), pName, intervalDays, safeEndDate));
+                    plan.setLockExpireDate(safeEndDate);
+                    harvestPlanMapper.updateById(plan);
+                    log.info("采收计划【{}】已锁定，原因：安全间隔期未满（{}喷施{}，{}天后可采收）",
+                            plan.getPlanNo(), operation.getOperationDate(), pName, safeEndDate);
+                    break;
+                }
+            }
+        }
+    }
+
+    @Transactional(rollbackFor = Exception.class)
+    public FlightOperation reassignPilot(Long operationId, Long newPilotId, String newPilotName, String reason) {
+        FlightOperation operation = flightOperationMapper.selectById(operationId);
+        if (operation == null) {
+            throw new BusinessException("作业记录不存在");
+        }
+        if (!"IN_PROGRESS".equals(operation.getOperationStatus()) && !"PAUSED".equals(operation.getOperationStatus())) {
+            throw new BusinessException("当前状态不允许改派，状态：" + operation.getOperationStatus());
+        }
+        if (operation.getPilotId() != null && operation.getPilotId().equals(newPilotId)) {
+            throw new BusinessException("新飞手与当前飞手相同，无需改派");
+        }
+
+        operation.setOriginalPilotId(operation.getPilotId());
+        operation.setOriginalPilotName(operation.getPilotName());
+        operation.setPilotId(newPilotId);
+        operation.setPilotName(newPilotName);
+        operation.setReassignReason(reason);
+        operation.setReassignTime(LocalDateTime.now());
+        flightOperationMapper.updateById(operation);
+
+        log.info("飞手改派成功，作业编号：{}，原飞手：{} → 新飞手：{}，原因：{}",
+                operation.getOperationNo(), operation.getOriginalPilotName(), newPilotName, reason);
+        return operation;
+    }
+
     public Map<String, Object> preCheckSafety(Long outboundId, LocalDate operationDate, BigDecimal windSpeed) {
         PesticideOutbound outbound = outboundMapper.selectById(outboundId);
         if (outbound == null) {
@@ -163,9 +239,33 @@ public class FlightOperationService {
             operation.setSafetyCheck(1);
         }
 
+        if (operation.getBoundaryPoints() == null) {
+            List<PlotBoundary> boundaries = plotBoundaryMapper != null ?
+                    plotBoundaryMapper.selectList(
+                            new LambdaQueryWrapper<PlotBoundary>().eq(PlotBoundary::getPlotId, operation.getPlotId())
+                                    .orderByAsc(PlotBoundary::getPointIndex)
+                    ) : new ArrayList<>();
+            if (!boundaries.isEmpty()) {
+                StringBuilder sb = new StringBuilder("{\"type\":\"Polygon\",\"coordinates\":[[");
+                for (int i = 0; i < boundaries.size(); i++) {
+                    PlotBoundary b = boundaries.get(i);
+                    if (i > 0) sb.append(",");
+                    sb.append("[").append(b.getLongitude()).append(",").append(b.getLatitude()).append("]");
+                }
+                if (!boundaries.isEmpty()) {
+                    sb.append(",[").append(boundaries.get(0).getLongitude()).append(",").append(boundaries.get(0).getLatitude()).append("]");
+                }
+                sb.append("]]}");
+                operation.setBoundaryPoints(sb.toString());
+                operation.setBoundaryVerified(1);
+            }
+        }
+
         flightOperationMapper.insert(operation);
 
         generateSafetyIntervalReminders(operation);
+
+        lockHarvestPlansForSafetyInterval(operation);
 
         log.info("创建飞行作业成功，作业编号：{}", operation.getOperationNo());
         return operation;
@@ -195,6 +295,50 @@ public class FlightOperationService {
 
         log.info("作业完成，作业编号：{}", operation.getOperationNo());
         return flightOperationMapper.selectById(id);
+    }
+
+    @Transactional(rollbackFor = Exception.class)
+    public FlightOperation cancelDueToWeather(Long id, String cancelReason) {
+        FlightOperation operation = flightOperationMapper.selectById(id);
+        if (operation == null) {
+            throw new BusinessException("作业记录不存在");
+        }
+        if (!"IN_PROGRESS".equals(operation.getOperationStatus()) && !"PAUSED".equals(operation.getOperationStatus())) {
+            throw new BusinessException("当前状态不允许取消，状态：" + operation.getOperationStatus());
+        }
+
+        operation.setOperationStatus("FLIGHT_CANCELLED");
+        operation.setProblemDescription(cancelReason != null ? cancelReason : "天气变更导致飞行取消");
+        flightOperationMapper.updateById(operation);
+
+        PesticideOutbound outbound = outboundMapper.selectById(operation.getOutboundId());
+        if (outbound != null) {
+            List<PesticideOutboundDetail> details = outboundDetailMapper.selectList(
+                    new LambdaQueryWrapper<PesticideOutboundDetail>().eq(PesticideOutboundDetail::getOutboundId, operation.getOutboundId())
+            );
+            for (PesticideOutboundDetail d : details) {
+                PesticideStockPending pending = new PesticideStockPending();
+                pending.setPendingNo(generatePendingNo());
+                pending.setPesticideId(d.getPesticideId());
+                pending.setPesticideCode(d.getPesticideCode());
+                pending.setPesticideName(d.getPesticideName());
+                pending.setBatchNo(d.getBatchNo());
+                pending.setQuantity(d.getQuantity());
+                pending.setUnit(d.getUnit());
+                pending.setSourceType("FLIGHT_CANCEL");
+                pending.setSourceId(outbound.getId());
+                pending.setSourceNo(outbound.getOutboundNo());
+                pending.setPendingReason(cancelReason != null ? cancelReason : "天气变更导致飞行取消，农药需核验后方可回库");
+                pending.setStatus("PENDING_VERIFY");
+                pending.setStockId(d.getStockId());
+                pending.setCreateBy(outbound.getWarehouseKeeperId());
+                pendingStockMapper.insert(pending);
+                log.info("天气取消飞行，农药批号【{}】进入待核验，作业编号：{}", d.getBatchNo(), operation.getOperationNo());
+            }
+        }
+
+        log.info("作业因天气取消，作业编号：{}", operation.getOperationNo());
+        return operation;
     }
 
     private void generateSafetyIntervalReminders(FlightOperation operation) {
@@ -353,5 +497,11 @@ public class FlightOperationService {
         String datePart = DateUtil.format(DateUtil.date(), "yyyyMM");
         int seq = remCounter.incrementAndGet() % 10000;
         return "REM" + datePart + String.format("%04d", seq);
+    }
+
+    private synchronized String generatePendingNo() {
+        String datePart = DateUtil.format(DateUtil.date(), "yyyyMM");
+        int seq = pndCounter.incrementAndGet() % 10000;
+        return "PND" + datePart + String.format("%04d", seq);
     }
 }

@@ -21,5 +21,13 @@ export const api = {
   queryFlights: (params) => request.get('/flight/page', { params }).then(r => r.data),
   getPlotWarnings: () => request.get('/flight/plot-warnings').then(r => r.data),
   queryReminders: (params) => request.get('/flight/reminders', { params }).then(r => r.data),
-  markReminderRead: (id) => request.post(`/flight/reminders/${id}/read`).then(r => r)
+  markReminderRead: (id) => request.post(`/flight/reminders/${id}/read`).then(r => r),
+
+  reassignPilot: (id, params) => request.post(`/flight/reassign-pilot/${id}`, null, { params }).then(r => r.data),
+  cancelFlightDueToWeather: (id, params) => request.post(`/flight/cancel-weather/${id}`, null, { params }).then(r => r.data),
+
+  validatePrescriptionComprehensive: (data) => request.post('/prescription/validate-comprehensive', data).then(r => r.data),
+
+  queryHarvestPlans: (params) => request.get('/harvest-plan/page', { params }).then(r => r.data),
+  completeHarvest: (id) => request.post(`/harvest-plan/complete/${id}`, { operatorId: JSON.parse(localStorage.getItem('m_user') || '{}').id }).then(r => r.data)
 }

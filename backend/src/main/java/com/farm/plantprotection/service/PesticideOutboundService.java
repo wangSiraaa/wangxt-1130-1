@@ -49,6 +49,102 @@ public class PesticideOutboundService {
     @Resource
     private BusinessValidator businessValidator;
 
+    @Resource
+    private PesticideStockPendingMapper pesticideStockPendingMapper;
+
+    private static final AtomicInteger pendingCounter = new AtomicInteger(0);
+
+    @Transactional(rollbackFor = Exception.class)
+    public void cancelFlightToPending(Long outboundId, String cancelReason) {
+        PesticideOutbound outbound = outboundMapper.selectById(outboundId);
+        if (outbound == null) {
+            throw new BusinessException("出库单不存在");
+        }
+        if (!"OUTBOUND".equals(outbound.getStatus())) {
+            throw new BusinessException("出库单状态不允许取消，当前状态：" + outbound.getStatus());
+        }
+
+        List<PesticideOutboundDetail> details = outboundDetailMapper.selectList(
+                new LambdaQueryWrapper<PesticideOutboundDetail>().eq(PesticideOutboundDetail::getOutboundId, outboundId)
+        );
+
+        for (PesticideOutboundDetail d : details) {
+            PesticideStockPending pending = new PesticideStockPending();
+            pending.setPendingNo(generatePendingNo());
+            pending.setPesticideId(d.getPesticideId());
+            pending.setPesticideCode(d.getPesticideCode());
+            pending.setPesticideName(d.getPesticideName());
+            pending.setBatchNo(d.getBatchNo());
+            pending.setQuantity(d.getQuantity());
+            pending.setUnit(d.getUnit());
+            pending.setSourceType("FLIGHT_CANCEL");
+            pending.setSourceId(outboundId);
+            pending.setSourceNo(outbound.getOutboundNo());
+            pending.setPendingReason(cancelReason != null ? cancelReason : "天气变更导致飞行取消，农药需核验后方可回库");
+            pending.setStatus("PENDING_VERIFY");
+            pending.setStockId(d.getStockId());
+            pending.setCreateBy(outbound.getWarehouseKeeperId());
+            pesticideStockPendingMapper.insert(pending);
+            log.info("农药批号【{}】{}已进入待核验库存，原因：{}", d.getBatchNo(), d.getPesticideName(), cancelReason);
+        }
+    }
+
+    @Transactional(rollbackFor = Exception.class)
+    public void verifyPendingStock(Long pendingId, Long verifyBy, String verifyByName, boolean approved, String verifyRemark) {
+        PesticideStockPending pending = pesticideStockPendingMapper.selectById(pendingId);
+        if (pending == null) {
+            throw new BusinessException("待核验记录不存在");
+        }
+        if (!"PENDING_VERIFY".equals(pending.getStatus())) {
+            throw new BusinessException("当前状态不允许核验，状态：" + pending.getStatus());
+        }
+
+        if (approved) {
+            PesticideStock stock = pesticideStockMapper.selectById(pending.getStockId());
+            if (stock != null) {
+                stock.setQuantity(stock.getQuantity().add(pending.getQuantity()));
+                pesticideStockMapper.updateById(stock);
+            } else {
+                PesticideStock newStock = new PesticideStock();
+                newStock.setPesticideId(pending.getPesticideId());
+                newStock.setBatchNo(pending.getBatchNo());
+                newStock.setQuantity(pending.getQuantity());
+                newStock.setUnit(pending.getUnit());
+                pesticideStockMapper.insert(newStock);
+                pending.setStockId(newStock.getId());
+            }
+            pending.setStatus("VERIFIED");
+            pending.setVerifyRemark(verifyRemark != null ? verifyRemark : "核验通过，已回库");
+        } else {
+            pending.setStatus("REJECTED");
+            pending.setVerifyRemark(verifyRemark != null ? verifyRemark : "核验拒绝，农药品质异常");
+        }
+
+        pending.setVerifyBy(verifyBy);
+        pending.setVerifyByName(verifyByName);
+        pending.setVerifyTime(LocalDateTime.now());
+        pesticideStockPendingMapper.updateById(pending);
+
+        log.info("待核验库存【{}】核验{}，农药：{} 批号：{}", pending.getPendingNo(), approved ? "通过回库" : "拒绝", pending.getPesticideName(), pending.getBatchNo());
+    }
+
+    public IPage<PesticideStockPending> queryPendingPage(int pageNum, int pageSize, String status) {
+        com.baomidou.mybatisplus.extension.plugins.pagination.Page<PesticideStockPending> page =
+                new com.baomidou.mybatisplus.extension.plugins.pagination.Page<>(pageNum, pageSize);
+        LambdaQueryWrapper<PesticideStockPending> wrapper = new LambdaQueryWrapper<>();
+        if (status != null && !status.isEmpty()) {
+            wrapper.eq(PesticideStockPending::getStatus, status);
+        }
+        wrapper.orderByDesc(PesticideStockPending::getCreateTime);
+        return pesticideStockPendingMapper.selectPage(page, wrapper);
+    }
+
+    private synchronized String generatePendingNo() {
+        String datePart = cn.hutool.core.date.DateUtil.format(cn.hutool.core.date.DateUtil.date(), "yyyyMM");
+        int seq = pendingCounter.incrementAndGet() % 10000;
+        return "PND" + datePart + String.format("%04d", seq);
+    }
+
     @Transactional(rollbackFor = Exception.class)
     public PesticideOutbound createOutboundFromPrescription(Long prescriptionId, Long warehouseKeeperId, String warehouseKeeperName) {
         Prescription prescription = prescriptionMapper.selectById(prescriptionId);

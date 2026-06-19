@@ -5,6 +5,7 @@ import com.farm.plantprotection.common.Result;
 import com.farm.plantprotection.entity.PesticideOutbound;
 import com.farm.plantprotection.entity.PesticideOutboundDetail;
 import com.farm.plantprotection.entity.PesticideStock;
+import com.farm.plantprotection.entity.PesticideStockPending;
 import com.farm.plantprotection.service.PesticideOutboundService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.bind.annotation.*;
@@ -58,5 +59,30 @@ public class PesticideOutboundController {
     @GetMapping("/stock/{pesticideId}")
     public Result<List<PesticideStock>> getStockByPesticide(@PathVariable Long pesticideId) {
         return Result.success(outboundService.getStockByPesticide(pesticideId));
+    }
+
+    @PostMapping("/cancel-flight/{outboundId}")
+    public Result<Void> cancelFlightToPending(@PathVariable Long outboundId,
+                                               @RequestParam(required = false) String cancelReason) {
+        outboundService.cancelFlightToPending(outboundId, cancelReason);
+        return Result.success();
+    }
+
+    @GetMapping("/pending-stock/page")
+    public Result<IPage<PesticideStockPending>> queryPendingStock(
+            @RequestParam(defaultValue = "1") int pageNum,
+            @RequestParam(defaultValue = "10") int pageSize,
+            @RequestParam(required = false) String status) {
+        return Result.success(outboundService.queryPendingPage(pageNum, pageSize, status));
+    }
+
+    @PostMapping("/pending-stock/{pendingId}/verify")
+    public Result<Void> verifyPendingStock(@PathVariable Long pendingId,
+                                            @RequestParam Long verifyBy,
+                                            @RequestParam String verifyByName,
+                                            @RequestParam boolean approved,
+                                            @RequestParam(required = false) String verifyRemark) {
+        outboundService.verifyPendingStock(pendingId, verifyBy, verifyByName, approved, verifyRemark);
+        return Result.success();
     }
 }
